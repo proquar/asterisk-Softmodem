@@ -1,7 +1,7 @@
 /*
  * BTX-Vermittlungsstelle for Asterisk
  *
- * 2010, Christian Groeger <chris@proquari.at>
+ * 2010, Christian Groeger <code@proquari.at>
  * 
  * Based on app_fax.c by Dmitry Andrianov <asterisk@dima.spb.ru>
  * and Steve Underwood <steveu@coppice.org>
@@ -85,9 +85,9 @@ static void btx_put_bit(void *user_data, int bit) {
 
 	btx_data *rx = (btx_data*) user_data;
 	
-	// terminal recognised us and starts responding through sending it's pilot tone
+	// terminal recognised us and starts responding through sending it's pilot signal
 	// because line-noise may be interpreted as bits by spandsp we regard 10 consecutive
-	// 1-bits as as the dbt-03s pilot tone, next step is to send a null-byte back
+	// 1-bits as as the dbt-03s mark frequency, next step is to send a null-byte back
 	if (rx->btx->answertone>0) {
 		if (bit==1) {
 			rx->btx->answertone--;

@@ -10,8 +10,6 @@
 	
 	Though app_btxvst.c is V.23 and BTX specific it is easy to modify the
 	sourcecode to be used with other FSK modem standards.
-	
-	
 
 
  Dependencies and Installation
@@ -23,7 +21,6 @@
 	1.6, please let me know if it doesn't.
 	
 	To compile put app_btxvst.c in the apps/ dir of your Asterisk source.
-	You may need to do a configure on your Asterisk source again.
 	Compile with 'make apps'.
 	
 	To use do a 'make install' on your asterisk source or copy
@@ -39,6 +36,9 @@
 	exten => btx,n,Hangup()
 	
 	All arguments are optional.
+	
+	V.23 works fine with VOIP as long as you use a codec like G.711
+	(alaw/ulaw). Please deactivate any echo canceller you might use.
 
 
  Ulm Relay Protocol
@@ -47,9 +47,9 @@
 	After BTXVst picks up the line a TCP connection to the specified host and
 	port is established, the call is dropped when this wasn't successfull.
 	
-	After the terminal's pilot signal is recognized a header is sent,
+	After the terminal's mark frequency is recognized a header is sent,
 	consisting of "name: value" pairs, separated by a CR+LF newline, terminated
-	by a douple newline.
+	by a double newline.
 	
 	At the moment this header looks like:
 		Version: 1
@@ -66,19 +66,19 @@
 	
 	You find a "Ulm Relay Protocol" server here:
 	http://github.com/proquar/twistedUlm
-	It sends CEPT T/CD 6-1 encoded pages, which it retrieves from a webserver,
+	It sends CEPT T/CD 6-1 encoded data, which it retrieves from a webserver,
 	to the terminal and provides the characteristic BTX look-and-feel.
 	
 	You may also be interested in:
 		http://runningserver.com/?page=runningserver.content.thelab.bildschirmtrix
-	And you find a description of this CEPT-Hypertext here:
+	And you find a description of BTX MarkupLanguage here:
 		http://runningserver.com/?page=runningserver.content.thelab.mikropad
 
 
  Authors
 -------------------------------------------------------------------------------
 
-	Christian Groeger <chris@proquari.at>
+	Christian Groeger <code@proquari.at>
 	
 	Based on code by:
 	Dmitry Andrianov <asterisk@dima.spb.ru>

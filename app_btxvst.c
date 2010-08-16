@@ -47,9 +47,9 @@ static char *btxvst_app = "BTXvst";
 static char *btxvst_synopsis = "Become a V23-Modem and act like a BTX Vermittlungsstelle.";
 static char *btxvst_descrip = 
 	"BTXvst(hostname,port,txpower,rxcutoff):  Pretends to be the old BTX Vermittlungsstelle\n"
-	"in Ulm/Germany, operated by the Bundespost. The Hardware id of the\n"
-	"terminal is requested and a connection to the specified host using the \n"
-	"\"Ulm Relay Protocol\" is established.\n";
+	"in Ulm/Germany, operated by the Bundespost. It waits for the carrier\n"
+	"signal of the terminal and establishes a TCP connection to the\n"
+	"specified host and port using the Ulm Relay Protocol.\n";
 
 
 #define MAX_SAMPLES 240
@@ -82,18 +82,14 @@ typedef struct {
 // this is called by spandsp whenever it filtered a new bit from the line
 static void btx_put_bit(void *user_data, int bit) {
 	int stop, i;
-
+	
 	btx_data *rx = (btx_data*) user_data;
 	
 	// terminal recognised us and starts responding through sending it's pilot signal
-	// because line-noise may be interpreted as bits by spandsp we regard 10 consecutive
-	// 1-bits as as the dbt-03s mark frequency, next step is to send a null-byte back
-	if (rx->btx->answertone>0) {
-		if (bit==1) {
-			rx->btx->answertone--;
-		}
-		else if (bit==0) {
-			rx->btx->answertone=10;
+	// next step is to send a null-byte back
+	if (rx->btx->answertone<=0) {
+		if (bit==SIG_STATUS_CARRIER_UP) {
+			rx->btx->answertone=1;
 		}
 	}
 	else {
@@ -121,7 +117,7 @@ static void btx_put_bit(void *user_data, int bit) {
 					if (rx->bitbuffer[stop]==1) {	// check for stopbit -> valid framing
 						char byte=0;
 						
-						for(i=0; i<=7; i++) {	// generate byte
+						for(i=0; i<=7; i++) {	// generate byte, lsb first
 							if (rx->bitbuffer[(rx->readpos+1+i)%BTX_BITBUFFER_SIZE])
 								byte |= (1<<i);
 						}
@@ -134,12 +130,12 @@ static void btx_put_bit(void *user_data, int bit) {
 					} else {	// no valid framing (no stopbit), remove first bit and maybe try again
 						rx->fill--;
 						rx->readpos++;
-						if (rx->readpos>=BTX_BITBUFFER_SIZE) rx->readpos=0;
+						rx->readpos %= BTX_BITBUFFER_SIZE;
 					}
 				} else {	// no valid framing either (no startbit)
 					rx->fill--;
 					rx->readpos++;
-					if (rx->readpos>=BTX_BITBUFFER_SIZE) rx->readpos=0;
+					rx->readpos %= BTX_BITBUFFER_SIZE;
 				}
 			}
 		}
@@ -161,10 +157,10 @@ static int btx_get_bit(void *user_data) {
 	// or we already sent that, than we check for new data on the socket
 	// or there's no new data, so we send 1s (mark)
 	if (tx->writepos==tx->readpos) {
-		if(tx->btx->nulsent==1) {	// connection is established, look for data on socket
+		if(tx->btx->nulsent>0) {	// connection is established, look for data on socket
 			rc=recv(tx->sock,&byte, 1, 0);
 			if (rc>0) {
-				// new data on socket, we put that byte into our bitbuffer
+				// new data on socket, we put that byte into our bitbuffer, lsb first
 				for (i=0; i<=8; i++) {
 					if (i>=8) tx->bitbuffer[tx->writepos]=1;	// stopbit
 					else {	// databits
@@ -182,9 +178,10 @@ static int btx_get_bit(void *user_data) {
 			}
 		}
 		else {
-			if ( tx->btx->answertone==0 ) {
+			if ( tx->btx->answertone>0 ) {
 // 				ast_log(LOG_WARNING,"Got TE's tone, will send null-byte.\n");
 				// send null byte
+				printf(">> ");
 				for (i=0; i<=8; i++) {
 					if (i>=8) tx->bitbuffer[tx->writepos]=1;	//stopbit
 					else {	//databits
@@ -313,7 +310,7 @@ static int btxvst_communicate(btx_session *s) {
 	
 	
 	btxstuff btxcomm;
-	btxcomm.answertone=10;
+	btxcomm.answertone=0;	//no carrier yet
 	btxcomm.nulsent=0;
 	
 	rxdata.sock=sock;
@@ -430,12 +427,12 @@ static int btxvst_exec(struct ast_channel *chan, void *data) {
 	if (args.txpower)
 		session.txpower=atof(args.txpower);
 	else
-		session.txpower=-30.0f;
+		session.txpower=-28.0f;
 	
 	if (args.rxcutoff)
 		session.rxcutoff=atof(args.rxcutoff);
 	else
-		session.rxcutoff=-70.0f;
+		session.rxcutoff=-30.0f;
 	
 	res=btxvst_communicate(&session);
 	

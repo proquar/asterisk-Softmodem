@@ -49,7 +49,10 @@ static char *btxvst_descrip =
 	"BTXvst(hostname,port,txpower,rxcutoff):  Pretends to be the old BTX Vermittlungsstelle\n"
 	"in Ulm/Germany, operated by the Bundespost. It waits for the carrier\n"
 	"signal of the terminal and establishes a TCP connection to the\n"
-	"specified host and port using the Ulm Relay Protocol.\n";
+	"specified host and port using the Ulm Relay Protocol.\n"
+	"\n"
+	"Usage: BTXvst(host, port, txpower(dBi), rxcutoff(dBi))\n"
+	"Defaults: BTXvst(localhost, 8289, -28, -35)\n";
 
 
 #define MAX_SAMPLES 240
@@ -89,6 +92,9 @@ static void btx_put_bit(void *user_data, int bit) {
 	// next step is to send a null-byte back
 	if (rx->btx->answertone<=0) {
 		if (bit==SIG_STATUS_CARRIER_UP) {
+			rx->btx->answertone=0;
+		}
+		else if (bit==1 && rx->btx->answertone==0) {
 			rx->btx->answertone=1;
 		}
 	}
@@ -178,6 +184,11 @@ static int btx_get_bit(void *user_data) {
 			}
 		}
 		else {
+			// check if socket was closed before connection was terminated (header timeout reached)
+			if ( recv(tx->sock,&byte, 1, MSG_PEEK) == 0 ) {
+				tx->session->finished=1;
+				return 1;
+			}
 			if ( tx->btx->answertone>0 ) {
 // 				ast_log(LOG_WARNING,"Got TE's tone, will send null-byte.\n");
 				// send null byte
@@ -310,7 +321,7 @@ static int btxvst_communicate(btx_session *s) {
 	
 	
 	btxstuff btxcomm;
-	btxcomm.answertone=0;	//no carrier yet
+	btxcomm.answertone=-1;	//no carrier yet
 	btxcomm.nulsent=0;
 	
 	rxdata.sock=sock;
@@ -432,7 +443,7 @@ static int btxvst_exec(struct ast_channel *chan, void *data) {
 	if (args.rxcutoff)
 		session.rxcutoff=atof(args.rxcutoff);
 	else
-		session.rxcutoff=-30.0f;
+		session.rxcutoff=-35.0f;
 	
 	res=btxvst_communicate(&session);
 	

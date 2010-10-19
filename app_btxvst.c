@@ -1,5 +1,5 @@
 /*
- * BTX-Vermittlungsstelle for Asterisk
+ * Softmodem for Asterisk
  *
  * 2010, Christian Groeger <code@proquari.at>
  * 
@@ -43,26 +43,87 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 209281 $")
 #include "asterisk/module.h"
 #include "asterisk/manager.h"
 
-static char *btxvst_app = "BTXvst";
-static char *btxvst_synopsis = "Become a V23-Modem and act like a BTX Vermittlungsstelle.";
-static char *btxvst_descrip = 
-	"BTXvst(hostname,port,txpower,rxcutoff):  Pretends to be the old BTX Vermittlungsstelle\n"
-	"in Ulm/Germany, operated by the Bundespost. It waits for the carrier\n"
-	"signal of the terminal and establishes a TCP connection to the\n"
-	"specified host and port using the Ulm Relay Protocol.\n"
+enum {
+	OPT_RX_CUTOFF =      (1 << 0),
+	OPT_TX_POWER =       (1 << 1),
+	OPT_MODEM_VERSION =  (1 << 2),
+	OPT_LSB_FIRST =      (1 << 3),
+	OPT_MSB_FIRST =      (1 << 4),
+	OPT_DATABITS =       (1 << 5),
+	OPT_STOPBITS =       (1 << 6),
+	OPT_ULM_HEADER =     (1 << 7),
+	OPT_NULL =           (1 << 8),
+};
+
+enum {
+	OPT_ARG_RX_CUTOFF,
+	OPT_ARG_TX_POWER,
+	OPT_ARG_MODEM_VERSION,
+	OPT_ARG_DATABITS,
+	OPT_ARG_STOPBITS,
+
+	/* Must be the last element */
+	OPT_ARG_ARRAY_SIZE,
+};
+
+AST_APP_OPTIONS(additional_options, BEGIN_OPTIONS
+	AST_APP_OPTION_ARG('r', OPT_RX_CUTOFF, OPT_ARG_RX_CUTOFF),
+	AST_APP_OPTION_ARG('t', OPT_TX_POWER, OPT_ARG_TX_POWER),
+	AST_APP_OPTION_ARG('v', OPT_MODEM_VERSION, OPT_ARG_MODEM_VERSION),
+	AST_APP_OPTION('l', OPT_LSB_FIRST),
+	AST_APP_OPTION('m', OPT_MSB_FIRST),
+	AST_APP_OPTION_ARG('d', OPT_DATABITS, OPT_ARG_DATABITS),
+	AST_APP_OPTION_ARG('s', OPT_STOPBITS, OPT_ARG_STOPBITS),
+	AST_APP_OPTION('u', OPT_ULM_HEADER),
+	AST_APP_OPTION('n', OPT_NULL),
+END_OPTIONS );
+
+static char *softmodem_app = "Softmodem";
+static char *softmodem_synopsis = "A Softmodem that connects the caller to a Telnet server.";
+static char *softmodem_descrip = 
+	"Softmodem(hostname,port,options):  Simulates a FSK(V.23) or V.22bis modem.\n"
+	"The modem on the other end is connected to the specified server using a \n"
+	"simple TCP connection (like Telnet).\n"
 	"\n"
-	"Usage: BTXvst(host, port, txpower(dBi), rxcutoff(dBi))\n"
-	"Defaults: BTXvst(localhost, 8289, -28, -35)\n";
+	"Options:"
+	"  r(...): rx cutoff (dBi, float, default: -35)\n"
+	"  t(...): tx power (dBi, float, default: -28)\n"
+	"  v(...): modem version (default: V23):\n"
+	"            V21        - 300/300 baud\n"
+	"            V23        - 1200/75 baud\n"
+	"            Bell103    - 300/300 baud\n"
+	"            V22        - 1200/1200 baud\n"
+	"            V22bis     - 2400/2400 baud\n"
+	"  l or m: least or most significant bit first (default: m)\n"
+	"  d(...): amount of data bits (5-8, default: 8)\n"
+	"  s(...): amount of stop bits (1-3, default: 1)\n"
+	"  u:      Send ULM header to Telnet server (Btx)\n"
+	"  n:      Send NULL-Byte to modem after carrier detection (Btx)\n"
+	"";
 
 
 #define MAX_SAMPLES 240
 
+enum {
+	VERSION_V21,
+	VERSION_V23,
+	VERSION_BELL103,
+	VERSION_V22,
+	VERSION_V22BIS,
+};
+
 typedef struct {
 	struct ast_channel *chan;
-	const char *host;	//ULMd host+port
+	const char *host;	//telnetd host+port
 	int port;
 	float txpower;
 	float rxcutoff;
+	int version;
+	int lsb;
+	int databits;
+	int stopbits;
+	int ulmheader;
+	int sendnull;
 	volatile int finished;
 } btx_session;
 
@@ -264,7 +325,7 @@ struct ast_generator generator = {
 	generate: 	btx_generator_generate,
 };
 
-static int btxvst_communicate(btx_session *s) {
+static int softmodem_communicate(btx_session *s) {
 	int res = -1;
 	int original_read_fmt = AST_FORMAT_SLINEAR;
 	int original_write_fmt = AST_FORMAT_SLINEAR;
@@ -367,7 +428,7 @@ static int btxvst_communicate(btx_session *s) {
 		if (inf->frametype == AST_FRAME_VOICE && inf->subclass == AST_FORMAT_SLINEAR) {
 			if (fsk_rx(btx_rx, inf->data.ptr, inf->samples) < 0) {
 				/* I know fax_rx never returns errors. The check here is for good style only */
-				ast_log(LOG_WARNING, "btxvst returned error\n");
+				ast_log(LOG_WARNING, "softmodem returned error\n");
 				res = -1;
 				break;
 			}
@@ -393,16 +454,17 @@ static int btxvst_communicate(btx_session *s) {
 
 }
 
-static int btxvst_exec(struct ast_channel *chan, void *data) {
+static int softmodem_exec(struct ast_channel *chan, void *data) {
 	int res = 0;
 	char *parse;
 	btx_session session;
+	struct ast_flags options = { 0, };
+	char *option_args[OPT_ARG_ARRAY_SIZE];
 
 	AST_DECLARE_APP_ARGS(args,
 		AST_APP_ARG(host);
 		AST_APP_ARG(port);
-		AST_APP_ARG(txpower);
-		AST_APP_ARG(rxcutoff);
+		AST_APP_ARG(options);
 	);
 
 	if (chan == NULL) {
@@ -421,6 +483,14 @@ static int btxvst_exec(struct ast_channel *chan, void *data) {
 	
 	session.chan=chan;
 	session.finished=0;
+	session.rxcutoff=-35.0f;
+	session.txpower=-28.0f;
+	session.version=VERSION_V23;
+	session.lsb=0;
+	session.databits=8;
+	session.stopbits=0;
+	session.ulmheader=0;
+	session.sendnull=0;
 	
 	parse=ast_strdupa(data);
 	AST_STANDARD_APP_ARGS(args,parse);
@@ -430,22 +500,82 @@ static int btxvst_exec(struct ast_channel *chan, void *data) {
 	else
 		session.host="localhost";
 	
-	if (args.port)
+	if (args.port) {
 		session.port=atoi(args.port);
-	else
-		session.port=8289;
+		if ((session.port<0) || (session.port>65535)) {
+			ast_log(LOG_ERROR, "Please specify a valid port number.\n");
+			return -1;
+		}
+	} else
+		session.port=23;
 	
-	if (args.txpower)
-		session.txpower=atof(args.txpower);
-	else
-		session.txpower=-28.0f;
 	
-	if (args.rxcutoff)
-		session.rxcutoff=atof(args.rxcutoff);
-	else
-		session.rxcutoff=-35.0f;
+	if (args.options) {
+		ast_app_parse_options(additional_options, &options, option_args, args.options);
+		
+		if (ast_test_flag(&options, OPT_RX_CUTOFF)) {
+			if (!ast_strlen_zero(option_args[OPT_ARG_RX_CUTOFF]))
+				session.rxcutoff=atof(option_args[OPT_ARG_RX_CUTOFF]);
+		}
+		
+		if (ast_test_flag(&options, OPT_TX_POWER)) {
+			if (!ast_strlen_zero(option_args[OPT_ARG_TX_POWER]))
+				session.txpower=atof(option_args[OPT_ARG_TX_POWER]);
+		}
+		
+		if (ast_test_flag(&options, OPT_MODEM_VERSION)) {
+			if (!ast_strlen_zero(option_args[OPT_ARG_MODEM_VERSION])) {
+				if (strcmp(option_args[OPT_ARG_MODEM_VERSION],"V21")==0)
+					session.version=VERSION_V21;
+				else if (strcmp(option_args[OPT_ARG_MODEM_VERSION],"V23")==0)
+					session.version=VERSION_V23;
+				else if (strcmp(option_args[OPT_ARG_MODEM_VERSION],"Bell103")==0)
+					session.version=VERSION_BELL103;
+				else if (strcmp(option_args[OPT_ARG_MODEM_VERSION],"V22")==0)
+					session.version=VERSION_V22;
+				else if (strcmp(option_args[OPT_ARG_MODEM_VERSION],"V22bis")==0)
+					session.version=VERSION_V22BIS;
+			}
+		}
+		
+		if (ast_test_flag(&options, OPT_LSB_FIRST)) {
+			if (ast_test_flag(&options, OPT_MSB_FIRST)) {
+				ast_log(LOG_ERROR, "Please only set l or m flag, not both.\n");
+				return -1;
+			}
+			session.lsb=1;
+		}
+		
+		if (ast_test_flag(&options, OPT_DATABITS)) {
+			if (!ast_strlen_zero(option_args[OPT_ARG_DATABITS])) {
+				session.databits = atoi(option_args[OPT_ARG_DATABITS]);
+				
+				if ((session.databits<5) || (session.databits>8)) {
+					ast_log(LOG_ERROR, "Only 5-8 data bits are supported.\n");
+					return -1;
+				}
+			}
+		}
+		
+		if (ast_test_flag(&options, OPT_STOPBITS)) {
+			if (!ast_strlen_zero(option_args[OPT_ARG_STOPBITS])) {
+				session.stopbits = atoi(option_args[OPT_ARG_STOPBITS]);
+				if ((session.stopbits<1) || (session.stopbits>3)) {
+					ast_log(LOG_ERROR, "Only 1-3 stop bits are supported.\n");
+					return -1;
+				}
+			}
+		}
+		
+		if (ast_test_flag(&options, OPT_ULM_HEADER)) {
+			session.ulmheader = 1;
+		}
+		if (ast_test_flag(&options, OPT_NULL)) {
+			session.sendnull = 1;
+		}
+	}
 	
-	res=btxvst_communicate(&session);
+	res=softmodem_communicate(&session);
 	
 	return res;
 }
@@ -454,17 +584,17 @@ static int btxvst_exec(struct ast_channel *chan, void *data) {
 
 static int unload_module(void) {
 	int res;
-	res = ast_unregister_application(btxvst_app);
+	res = ast_unregister_application(softmodem_app);
 	return res;
 }
 
 static int load_module(void) {
 	int res ;
-	res = ast_register_application(btxvst_app, btxvst_exec, btxvst_synopsis, btxvst_descrip);
+	res = ast_register_application(softmodem_app, softmodem_exec, softmodem_synopsis, softmodem_descrip);
 	return res;
 }
 
-AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_DEFAULT, "BTX Vermittlungsstelle",
+AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_DEFAULT, "Softmodem",
 		.load = load_module,
 		.unload = unload_module,
 		);

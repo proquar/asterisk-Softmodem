@@ -96,7 +96,7 @@ static char *softmodem_descrip =
 	"            V22bis     - 2400/2400 baud\n"
 	"  l or m: least or most significant bit first (default: m)\n"
 	"  d(...): amount of data bits (5-8, default: 8)\n"
-	"  s(...): amount of stop bits (1-3, default: 1)\n"
+	"  s(...): amount of stop bits (1-2, default: 1)\n"
 	"  u:      Send ULM header to Telnet server (Btx)\n"
 	"  n:      Send NULL-Byte to modem after carrier detection (Btx)\n"
 	"";
@@ -125,32 +125,34 @@ typedef struct {
 	int ulmheader;
 	int sendnull;
 	volatile int finished;
-} btx_session;
+} modem_session;
 
-#define BTX_BITBUFFER_SIZE 16
+#define MODEM_BITBUFFER_SIZE 16
 typedef struct {
 	int answertone;		// terminal is active (=sends data)
 	int nulsent;		// we sent a NULL as very first character (at least the DBT03 expects this)
 } btxstuff;
 typedef struct {
 	int sock;
-	int bitbuffer[BTX_BITBUFFER_SIZE];
+	int bitbuffer[MODEM_BITBUFFER_SIZE];
 	int writepos;
 	int readpos;
 	int fill;
 	btxstuff *btx;
-	btx_session *session;
+	modem_session *session;
 } btx_data;
 
 
 // this is called by spandsp whenever it filtered a new bit from the line
-static void btx_put_bit(void *user_data, int bit) {
-	int stop, i;
+static void modem_put_bit(void *user_data, int bit) {
+	int stop, stop2, i;
 	
 	btx_data *rx = (btx_data*) user_data;
 	
-	// terminal recognised us and starts responding through sending it's pilot signal
-	// next step is to send a null-byte back
+	int databits = rx->session->databits;
+	int stopbits = rx->session->stopbits;
+	
+	// modem recognised us and starts responding through sending it's pilot signal
 	if (rx->btx->answertone<=0) {
 		if (bit==SIG_STATUS_CARRIER_UP) {
 			rx->btx->answertone=0;
@@ -166,43 +168,51 @@ static void btx_put_bit(void *user_data, int bit) {
 			// insert bit into our bitbuffer
 			rx->bitbuffer[rx->writepos]=bit;
 			rx->writepos++;
-			if (rx->writepos>=BTX_BITBUFFER_SIZE) rx->writepos=0;
+			if (rx->writepos>=MODEM_BITBUFFER_SIZE) rx->writepos=0;
 			
-			if (rx->fill<BTX_BITBUFFER_SIZE) {
+			if (rx->fill<MODEM_BITBUFFER_SIZE) {
 				rx->fill++;
 			} else { 
 				// our bitbuffer is full, this probably won't happen
 	// 			printf("full buffer\n");
 				rx->readpos++;
-				if (rx->readpos>=BTX_BITBUFFER_SIZE) rx->readpos=0;
+				if (rx->readpos>=MODEM_BITBUFFER_SIZE) rx->readpos=0;
 			}
 			
-			// minimum 10 bits for full byte
-			while (rx->fill>=10) {
+			// full byte = 1 startbit + databits + stopbits
+			while (rx->fill>=(1+databits+stopbits)) {
 				if (rx->bitbuffer[rx->readpos]==0) {	// check for startbit
-					stop=(rx->readpos+9)%BTX_BITBUFFER_SIZE;
-					if (rx->bitbuffer[stop]==1) {	// check for stopbit -> valid framing
+					stop=(rx->readpos+1+databits)%MODEM_BITBUFFER_SIZE;
+					stop2=(rx->readpos+2+databits)%MODEM_BITBUFFER_SIZE;
+					if ( (rx->bitbuffer[stop]==1) &&
+						(stopbits==1 || (stopbits==2 && rx->bitbuffer[stop2]==1)) )
+					{	// check for stopbit -> valid framing
 						char byte=0;
 						
-						for(i=0; i<=7; i++) {	// generate byte, lsb first
-							if (rx->bitbuffer[(rx->readpos+1+i)%BTX_BITBUFFER_SIZE])
-								byte |= (1<<i);
+						for(i=0; i<databits; i++) {	// generate byte
+							if (rx->session->lsb) { //lsb first
+								if (rx->bitbuffer[(rx->readpos+1+i)%MODEM_BITBUFFER_SIZE])
+									byte |= (1<<i);
+							} else { //msb first
+								if (rx->bitbuffer[(rx->readpos+databits-i)%MODEM_BITBUFFER_SIZE])
+									byte |= (1<<i);
+							}
 						}
 						
 						send(rx->sock, &byte, 1, 0);
 						
-						rx->readpos=(rx->readpos+10)%BTX_BITBUFFER_SIZE;
+						rx->readpos=(rx->readpos+10)%MODEM_BITBUFFER_SIZE;
 						rx->fill-=10;
 						
 					} else {	// no valid framing (no stopbit), remove first bit and maybe try again
 						rx->fill--;
 						rx->readpos++;
-						rx->readpos %= BTX_BITBUFFER_SIZE;
+						rx->readpos %= MODEM_BITBUFFER_SIZE;
 					}
 				} else {	// no valid framing either (no startbit)
 					rx->fill--;
 					rx->readpos++;
-					rx->readpos %= BTX_BITBUFFER_SIZE;
+					rx->readpos %= MODEM_BITBUFFER_SIZE;
 				}
 			}
 		}
@@ -214,28 +224,36 @@ static void btx_put_bit(void *user_data, int bit) {
 }
 
 // spandsp asks us for a bit to send onto the line
-static int btx_get_bit(void *user_data) {
+static int modem_get_bit(void *user_data) {
 	btx_data *tx = (btx_data*) user_data;
 	char byte=0;
 	int i, rc;
 	
+	int databits=tx->session->databits;
+	int stopbits=tx->session->stopbits;
+	
 	// no new data in send (bit)buffer, 
-	// either we just picked up the line, the terminal started to respond, then we need to put a NULL-byte on the line first,
-	// or we already sent that, than we check for new data on the socket
+	// either we just picked up the line, the terminal started to respond,
+	// than we check for new data on the socket
 	// or there's no new data, so we send 1s (mark)
 	if (tx->writepos==tx->readpos) {
 		if(tx->btx->nulsent>0) {	// connection is established, look for data on socket
 			rc=recv(tx->sock,&byte, 1, 0);
 			if (rc>0) {
-				// new data on socket, we put that byte into our bitbuffer, lsb first
-				for (i=0; i<=8; i++) {
-					if (i>=8) tx->bitbuffer[tx->writepos]=1;	// stopbit
+				// new data on socket, we put that byte into our bitbuffer
+				for (i=0; i<(databits+stopbits); i++) {
+					if (i>=databits) tx->bitbuffer[tx->writepos]=1;	// stopbits
 					else {	// databits
-						if (byte & (1<<i)) tx->bitbuffer[tx->writepos]=1;
-						else tx->bitbuffer[tx->writepos]=0;
+						if (tx->session->lsb) {
+							if (byte & (1<<i)) tx->bitbuffer[tx->writepos]=1;
+							else tx->bitbuffer[tx->writepos]=0;
+						} else {
+							if (byte & (1<<(databits-1-i))) tx->bitbuffer[tx->writepos]=1;
+							else tx->bitbuffer[tx->writepos]=0;
+						}
 					}
 					tx->writepos++;
-					if (tx->writepos>=BTX_BITBUFFER_SIZE) tx->writepos=0;
+					if (tx->writepos>=MODEM_BITBUFFER_SIZE) tx->writepos=0;
 				}
 				return 0; // return startbit immediately
 			}
@@ -245,29 +263,58 @@ static int btx_get_bit(void *user_data) {
 			}
 		}
 		else {
-			// check if socket was closed before connection was terminated (header timeout reached)
+			// check if socket was closed before connection was terminated
 			if ( recv(tx->sock,&byte, 1, MSG_PEEK) == 0 ) {
 				tx->session->finished=1;
 				return 1;
 			}
 			if ( tx->btx->answertone>0 ) {
 // 				ast_log(LOG_WARNING,"Got TE's tone, will send null-byte.\n");
-				// send null byte
-				printf(">> ");
-				for (i=0; i<=8; i++) {
-					if (i>=8) tx->bitbuffer[tx->writepos]=1;	//stopbit
-					else {	//databits
-						tx->bitbuffer[tx->writepos]=0;
+				
+				if (tx->session->sendnull) { // send null byte
+					for (i=0; i<(databits+stopbits); i++) {
+						if (i>=databits) tx->bitbuffer[tx->writepos]=1;	//stopbits
+						else tx->bitbuffer[tx->writepos]=0; //databits
+						tx->writepos++;
+						if (tx->writepos>=MODEM_BITBUFFER_SIZE) tx->writepos=0;
 					}
-					tx->writepos++;
-					if (tx->writepos>=BTX_BITBUFFER_SIZE) tx->writepos=0;
 				}
 				tx->btx->nulsent=1;
 				
-				// send ULM relay protocol header, we don't know anything about the caller, so it's rather empty
-				send(tx->sock, "Version: 1\r\nTXspeed: 120\r\nRXspeed: 7.5\r\n\r\n", 42, 0);
+				if (tx->session->ulmheader) {
+					// send ULM relay protocol header, include connection speed
+					float tx_baud,rx_baud;
+					if (tx->session->version==VERSION_V21) {
+						tx_baud=300;
+						rx_baud=300;
+					} else if (tx->session->version==VERSION_V23) {
+						tx_baud=1200;
+						rx_baud=75;
+					} else if (tx->session->version==VERSION_BELL103) {
+						tx_baud=300;
+						rx_baud=300;
+					} else if (tx->session->version==VERSION_V22) {
+						tx_baud=1200;
+						rx_baud=1200;
+					} else if (tx->session->version==VERSION_V22BIS) {
+						tx_baud=2400;
+						rx_baud=2400;
+					} else {
+						tx_baud=0;
+						rx_baud=0;
+					}
+					
+					char header[60];
+					int headerlength=sprintf(header, 
+						"Version: 1\r\nTXspeed: %.2f\r\nRXspeed: %.2f\r\n\r\n",
+						tx_baud/(1+databits+stopbits), rx_baud/(1+databits+stopbits));
+					send(tx->sock, header, headerlength, 0);
+				}
 				
-				return 0;
+				if (tx->session->sendnull)
+					return 0;
+				else
+					return 1;
 			}
 		}
 		
@@ -278,7 +325,7 @@ static int btx_get_bit(void *user_data) {
 		// there still is data in the bitbuffer, so we just send that out
 		i=tx->bitbuffer[tx->readpos];
 		tx->readpos++;
-		if (tx->readpos>=BTX_BITBUFFER_SIZE) tx->readpos=0;
+		if (tx->readpos>=MODEM_BITBUFFER_SIZE) tx->readpos=0;
 // 		printf("b%i",i);
 		return i;
 	}
@@ -325,7 +372,7 @@ struct ast_generator generator = {
 	generate: 	btx_generator_generate,
 };
 
-static int softmodem_communicate(btx_session *s) {
+static int softmodem_communicate(modem_session *s) {
 	int res = -1;
 	int original_read_fmt = AST_FORMAT_SLINEAR;
 	int original_write_fmt = AST_FORMAT_SLINEAR;
@@ -334,8 +381,8 @@ static int softmodem_communicate(btx_session *s) {
 	
 	struct ast_frame *inf = NULL;
 	
-	fsk_tx_state_t *btx_tx;
-	fsk_rx_state_t *btx_rx;
+	fsk_tx_state_t *modem_tx;
+	fsk_rx_state_t *modem_rx;
 	
 	
 	original_read_fmt = s->chan->readformat;
@@ -400,13 +447,30 @@ static int softmodem_communicate(btx_session *s) {
 	txdata.session=s;
 	
 	// initialise spandsp-stuff, give it our callback-functions
-	btx_tx = fsk_tx_init(NULL, &preset_fsk_specs[FSK_V23CH1], btx_get_bit, &txdata);
-	fsk_tx_power (btx_tx, s->txpower);
-	btx_rx = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V23CH2], TRUE, btx_put_bit, &rxdata);
-	fsk_rx_signal_cutoff(btx_rx, s->rxcutoff);
+	if (s->version==VERSION_V21) {
+		modem_tx = fsk_tx_init(NULL, &preset_fsk_specs[FSK_V21CH2], modem_get_bit, &txdata);
+		modem_rx = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V21CH1], TRUE, modem_put_bit, &rxdata);
+	}
+	else if (s->version==VERSION_V23) {
+		modem_tx = fsk_tx_init(NULL, &preset_fsk_specs[FSK_V23CH1], modem_get_bit, &txdata);
+		modem_rx = fsk_rx_init(NULL, &preset_fsk_specs[FSK_V23CH2], TRUE, modem_put_bit, &rxdata);
+	}
+	else if (s->version==VERSION_BELL103) {
+		modem_tx = fsk_tx_init(NULL, &preset_fsk_specs[FSK_BELL103CH1], modem_get_bit, &txdata);
+		modem_rx = fsk_rx_init(NULL, &preset_fsk_specs[FSK_BELL103CH2], TRUE, modem_put_bit, &rxdata);
+	}
+	else {
+		ast_log(LOG_ERROR,"Only FSK modems are supported at the moment. Sorry.\n");
+		return res;
+	}
+	
+	if (s->version==VERSION_V21 || s->version==VERSION_V23 || s->version==VERSION_BELL103) {
+		fsk_tx_power (modem_tx, s->txpower);
+		fsk_rx_signal_cutoff(modem_rx, s->rxcutoff);
+	}
 	
 	//printf("comm: baud %i\n",btx_tx->baud_rate);
-	ast_activate_generator(s->chan, &generator, btx_tx);
+	ast_activate_generator(s->chan, &generator, modem_tx);
 	
 	while (!s->finished) {
 		res = ast_waitfor(s->chan, 20);
@@ -426,7 +490,7 @@ static int softmodem_communicate(btx_session *s) {
 		   that a frame in old format was already queued before we set chanel format
 		   to slinear so it will still be received by ast_read */
 		if (inf->frametype == AST_FRAME_VOICE && inf->subclass == AST_FORMAT_SLINEAR) {
-			if (fsk_rx(btx_rx, inf->data.ptr, inf->samples) < 0) {
+			if (fsk_rx(modem_rx, inf->data.ptr, inf->samples) < 0) {
 				/* I know fax_rx never returns errors. The check here is for good style only */
 				ast_log(LOG_WARNING, "softmodem returned error\n");
 				res = -1;
@@ -457,7 +521,7 @@ static int softmodem_communicate(btx_session *s) {
 static int softmodem_exec(struct ast_channel *chan, void *data) {
 	int res = 0;
 	char *parse;
-	btx_session session;
+	modem_session session;
 	struct ast_flags options = { 0, };
 	char *option_args[OPT_ARG_ARRAY_SIZE];
 
@@ -560,8 +624,8 @@ static int softmodem_exec(struct ast_channel *chan, void *data) {
 		if (ast_test_flag(&options, OPT_STOPBITS)) {
 			if (!ast_strlen_zero(option_args[OPT_ARG_STOPBITS])) {
 				session.stopbits = atoi(option_args[OPT_ARG_STOPBITS]);
-				if ((session.stopbits<1) || (session.stopbits>3)) {
-					ast_log(LOG_ERROR, "Only 1-3 stop bits are supported.\n");
+				if ((session.stopbits<1) || (session.stopbits>2)) {
+					ast_log(LOG_ERROR, "Only 1-2 stop bits are supported.\n");
 					return -1;
 				}
 			}

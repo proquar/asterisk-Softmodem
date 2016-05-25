@@ -17,8 +17,7 @@ BEWARE: THIS IS STILL UNTESTED!!!
 	app_softmodem.c depends on the spandsp library
 	(http://www.soft-switch.org/).
 	
-	It is tested with Asterisk 1.6.1, but it should work with Asterisk 1.4 and
-	1.6, please let me know if it doesn't.
+	It is tested and working with Asterisk 13t.
 	
 	To compile put app_softmodem.c in the apps/ dir of your Asterisk source.
 	Compile with 'make apps'.
@@ -55,7 +54,7 @@ BEWARE: THIS IS STILL UNTESTED!!!
 	
 	To act as a "Btx Vermittlungsstelle" (German videotex system) using V.23, 8 data bits, 1 stop bit and sending a NULL byte upon carrier detection and connecting to a "twistedUlm" server on port 8289 (thus sending the ULM header):
 	
-	Softmodem(localhost, 8289, v(V23)ld(8)s(1)um)
+	exten => 190,1,Softmodem(localhost, 8289, v(V23)ld(8)s(1)un)
 	
 	The modem seems to work fine with VOIP as long as you use a codec like G.711
 	(alaw/ulaw). Please deactivate any echo cancellation you might use.

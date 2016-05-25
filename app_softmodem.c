@@ -13,11 +13,12 @@
 
 /*** MODULEINFO
 	 <depend>spandsp</depend>
+	<support_level>extended</support_level>
 ***/
  
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 209281 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 
 #include <string.h>
 #include <stdlib.h>
@@ -32,16 +33,54 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 209281 $")
 #ifdef HAVE_SPANDSP_EXPOSE_H
 #include <spandsp/expose.h>
 #endif
+#include <spandsp/v22bis.h>
 
-#include "asterisk/lock.h"
 #include "asterisk/file.h"
-#include "asterisk/logger.h"
-#include "asterisk/channel.h"
-#include "asterisk/pbx.h"
-#include "asterisk/app.h"
-#include "asterisk/dsp.h"
 #include "asterisk/module.h"
+#include "asterisk/channel.h"
+#include "asterisk/strings.h"
+#include "asterisk/lock.h"
+#include "asterisk/app.h"
+#include "asterisk/pbx.h"
+#include "asterisk/format_cache.h"
+#include "asterisk/logger.h"
+#include "asterisk/utils.h"
+#include "asterisk/dsp.h"
 #include "asterisk/manager.h"
+
+#ifndef AST_MODULE
+#define AST_MODULE "app_softmodem"
+#endif
+
+/*** DOCUMENTATION
+	<application name="Softmodem" language="en_US">
+		<synopsis>
+			A Softmodem that connects the caller to a Telnet server.
+		</synopsis>
+		<syntax />
+		<description>
+			<para>Softmodem(hostname,port,options):  Simulates a FSK(V.23) or V.22bis modem. The modem on the other end is connected to the specified server using a simple TCP connection (like Telnet).</para>
+		</description>
+	</application>
+ ***/
+
+/**
+ * 	"Options:"
+	"  r(...): rx cutoff (dBi, float, default: -35)\n"
+	"  t(...): tx power (dBi, float, default: -28)\n"
+	"  v(...): modem version (default: V23):\n"
+	"            V21        - 300/300 baud\n"
+	"            V23        - 1200/75 baud\n"
+	"            Bell103    - 300/300 baud\n"
+	"            V22        - 1200/1200 baud\n"
+	"            V22bis     - 2400/2400 baud\n"
+	"  l or m: least or most significant bit first (default: m)\n"
+	"  d(...): amount of data bits (5-8, default: 8)\n"
+	"  s(...): amount of stop bits (1-2, default: 1)\n"
+	"  u:      Send ULM header to Telnet server (Btx)\n"
+	"  n:      Send NULL-Byte to modem after carrier detection (Btx)\n" **/
+
+static const char app[] = "Softmodem";
 
 enum {
 	OPT_RX_CUTOFF =      (1 << 0),
@@ -77,29 +116,6 @@ AST_APP_OPTIONS(additional_options, BEGIN_OPTIONS
 	AST_APP_OPTION('u', OPT_ULM_HEADER),
 	AST_APP_OPTION('n', OPT_NULL),
 END_OPTIONS );
-
-static char *softmodem_app = "Softmodem";
-static char *softmodem_synopsis = "A Softmodem that connects the caller to a Telnet server.";
-static char *softmodem_descrip = 
-	"Softmodem(hostname,port,options):  Simulates a FSK(V.23) or V.22bis modem.\n"
-	"The modem on the other end is connected to the specified server using a \n"
-	"simple TCP connection (like Telnet).\n"
-	"\n"
-	"Options:"
-	"  r(...): rx cutoff (dBi, float, default: -35)\n"
-	"  t(...): tx power (dBi, float, default: -28)\n"
-	"  v(...): modem version (default: V23):\n"
-	"            V21        - 300/300 baud\n"
-	"            V23        - 1200/75 baud\n"
-	"            Bell103    - 300/300 baud\n"
-	"            V22        - 1200/1200 baud\n"
-	"            V22bis     - 2400/2400 baud\n"
-	"  l or m: least or most significant bit first (default: m)\n"
-	"  d(...): amount of data bits (5-8, default: 8)\n"
-	"  s(...): amount of stop bits (1-2, default: 1)\n"
-	"  u:      Send ULM header to Telnet server (Btx)\n"
-	"  n:      Send NULL-Byte to modem after carrier detection (Btx)\n"
-	"";
 
 
 #define MAX_SAMPLES 240
@@ -344,7 +360,7 @@ static int fsk_generator_generate(struct ast_channel *chan, void *data, int len,
 	
 	struct ast_frame outf = {
 		.frametype = AST_FRAME_VOICE,
-		.subclass = AST_FORMAT_SLINEAR,
+		.subclass.format = ast_format_slin,
 		.src = __FUNCTION__,
 	};
 
@@ -359,7 +375,7 @@ static int fsk_generator_generate(struct ast_channel *chan, void *data, int len,
 		AST_FRAME_SET_BUFFER(&outf, buffer, AST_FRIENDLY_OFFSET, len * sizeof(int16_t));
 
 		if (ast_write(chan, &outf) < 0) {
-			ast_log(LOG_WARNING, "Failed to write frame to '%s': %s\n", chan->name, strerror(errno));
+			ast_log(LOG_WARNING, "Failed to write frame to %s: %s\n", ast_channel_name(chan), strerror(errno));
 			return -1;
 		}
 	}
@@ -376,7 +392,7 @@ static int v22_generator_generate(struct ast_channel *chan, void *data, int len,
 	
 	struct ast_frame outf = {
 		.frametype = AST_FRAME_VOICE,
-		.subclass = AST_FORMAT_SLINEAR,
+		.subclass.format = ast_format_slin,
 		.src = __FUNCTION__,
 	};
 
@@ -391,7 +407,7 @@ static int v22_generator_generate(struct ast_channel *chan, void *data, int len,
 		AST_FRAME_SET_BUFFER(&outf, buffer, AST_FRIENDLY_OFFSET, len * sizeof(int16_t));
 
 		if (ast_write(chan, &outf) < 0) {
-			ast_log(LOG_WARNING, "Failed to write frame to '%s': %s\n", chan->name, strerror(errno));
+			ast_log(LOG_WARNING, "Failed to write frame to %s: %s\n", ast_channel_name(chan), strerror(errno));
 			return -1;
 		}
 	}
@@ -410,8 +426,8 @@ struct ast_generator v22_generator = {
 
 static int softmodem_communicate(modem_session *s) {
 	int res = -1;
-	int original_read_fmt = AST_FORMAT_SLINEAR;
-	int original_write_fmt = AST_FORMAT_SLINEAR;
+	struct ast_format *original_read_fmt;
+	struct ast_format *original_write_fmt;
 	
 	modem_data rxdata, txdata;
 	
@@ -423,18 +439,18 @@ static int softmodem_communicate(modem_session *s) {
 	v22bis_state_t *v22_modem;
 	
 	
-	original_read_fmt = s->chan->readformat;
-	if (original_read_fmt != AST_FORMAT_SLINEAR) {
-		res = ast_set_read_format(s->chan, AST_FORMAT_SLINEAR);
+	original_read_fmt = ast_channel_readformat(s->chan);
+	if (original_read_fmt != ast_format_slin) {
+		res=ast_set_read_format(s->chan, ast_format_slin);
 		if (res < 0) {
 			ast_log(LOG_WARNING, "Unable to set to linear read mode, giving up\n");
 			return res;
 		}
 	}
 
-	original_write_fmt = s->chan->writeformat;
-	if (original_write_fmt != AST_FORMAT_SLINEAR) {
-		res = ast_set_write_format(s->chan, AST_FORMAT_SLINEAR);
+	original_write_fmt = ast_channel_writeformat(s->chan);
+	if (original_write_fmt != ast_format_slin) {
+		res=ast_set_write_format(s->chan, ast_format_slin);
 		if (res < 0) {
 			ast_log(LOG_WARNING, "Unable to set to linear write mode, giving up\n");
 			return res;
@@ -540,7 +556,7 @@ static int softmodem_communicate(modem_session *s) {
 		/* Check the frame type. Format also must be checked because there is a chance
 		   that a frame in old format was already queued before we set chanel format
 		   to slinear so it will still be received by ast_read */
-		if (inf->frametype == AST_FRAME_VOICE && inf->subclass == AST_FORMAT_SLINEAR) {
+		if (inf->frametype == AST_FRAME_VOICE && inf->subclass.format == ast_format_slin) {
 			if (s->version==VERSION_V21 || s->version==VERSION_V23 || s->version==VERSION_BELL103) {
 				if (fsk_rx(modem_rx, inf->data.ptr, inf->samples) < 0) {
 					/* I know fax_rx never returns errors. The check here is for good style only */
@@ -569,21 +585,21 @@ static int softmodem_communicate(modem_session *s) {
 		v22bis_free(v22_modem);
 	}
 	
-	if (original_write_fmt != AST_FORMAT_SLINEAR) {
+	if (original_write_fmt != ast_format_slin) {
 		if (ast_set_write_format(s->chan, original_write_fmt) < 0)
-			ast_log(LOG_WARNING, "Unable to restore write format on '%s'\n", s->chan->name);
+			ast_log(LOG_WARNING, "Unable to restore write format on '%s'\n", ast_channel_name(s->chan));
 	}
 
-	if (original_read_fmt != AST_FORMAT_SLINEAR) {
+	if (original_read_fmt != ast_format_slin) {
 		if (ast_set_read_format(s->chan, original_read_fmt) < 0)
-			ast_log(LOG_WARNING, "Unable to restore read format on '%s'\n", s->chan->name);
+			ast_log(LOG_WARNING, "Unable to restore read format on '%s'\n", ast_channel_name(s->chan));
 	}
 
 	return res;
 
 }
 
-static int softmodem_exec(struct ast_channel *chan, void *data) {
+static int softmodem_exec(struct ast_channel *chan, const char *data) {
 	int res = 0;
 	char *parse;
 	modem_session session;
@@ -602,10 +618,10 @@ static int softmodem_exec(struct ast_channel *chan, void *data) {
 	}
 	
 	/* answer channel if not already answered */
-	if (chan->_state != AST_STATE_UP) {
+	if (ast_channel_state(chan) != AST_STATE_UP) {
 		res = ast_answer(chan);
 		if (res) {
-			ast_log(LOG_WARNING, "Could not answer channel '%s'\n", chan->name);
+			ast_log(LOG_WARNING, "Could not answer channel '%s'\n", ast_channel_name(chan));
 			return res;
 		}
 	}
@@ -617,7 +633,7 @@ static int softmodem_exec(struct ast_channel *chan, void *data) {
 	session.version=VERSION_V23;
 	session.lsb=0;
 	session.databits=8;
-	session.stopbits=0;
+	session.stopbits=1;
 	session.ulmheader=0;
 	session.sendnull=0;
 	
@@ -712,18 +728,12 @@ static int softmodem_exec(struct ast_channel *chan, void *data) {
 
 
 static int unload_module(void) {
-	int res;
-	res = ast_unregister_application(softmodem_app);
-	return res;
+	return ast_unregister_application(app);
 }
 
 static int load_module(void) {
-	int res ;
-	res = ast_register_application(softmodem_app, softmodem_exec, softmodem_synopsis, softmodem_descrip);
-	return res;
+	return ast_register_application_xml(app, softmodem_exec);
 }
 
-AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_DEFAULT, "Softmodem",
-		.load = load_module,
-		.unload = unload_module,
-		);
+
+AST_MODULE_INFO_STANDARD_EXTENDED(ASTERISK_GPL_KEY, "Softmodem v22");

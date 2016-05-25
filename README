@@ -2,8 +2,6 @@
  app_softmodem.c - V.21/V.22/V.23 modem for Asterisk
 ===============================================================================
 
-BEWARE: THIS IS STILL UNTESTED!!!
-
 	This Asterisk application provides a softmodem for Asterisk. It supports
 	the FSK standards V.23, V.21 and Bell 103, but also V.22 and V.22bis.
 	Byte-size, number of stopbits and bitordering is configurable.

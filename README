@@ -14,12 +14,12 @@
 
 	app_softmodem.c depends on the spandsp library
 	(http://www.soft-switch.org/).
-	
+
 	It is tested and working with Asterisk 13t.
-	
+
 	To compile put app_softmodem.c in the apps/ dir of your Asterisk source.
 	Compile with 'make apps'.
-	
+
 	To use do a 'make install' on your asterisk source or copy
 	apps/app_softmodem.so into your asterisk module directory
 	(/lib/asterisk/mosules).
@@ -31,10 +31,10 @@
 	exten => btx,1,Answer()
 	exten => btx,n,Softmodem(host, port, options)
 	exten => btx,n,Hangup()
-	
+
 	Without any arguments the application acts as a V.23 modem and connects to a
 	Telnet server (port 23) on localhost.
-	
+
 	Options are:
 		r(...): rx cutoff (dBi, float, default: -35)
 		t(...): tx power (dBi, float, default: -28)
@@ -47,13 +47,20 @@
 		l or m: least or most significant bit first (default: m)
 		d(...): amount of data bits (5-8, default: 8)
 		s(...): amount of stop bits (1-2, default: 1)
+		e or o: add even or odd parity bit
 		u:      Send Ulm Relay Protocol header to Telnet server
 		n:      Send NULL-Byte to modem after carrier detection (Btx specific)
-	
+
 	To act as a "Btx Vermittlungsstelle" (German videotex system) using V.23, 8 data bits, 1 stop bit and sending a NULL byte upon carrier detection and connecting to a "twistedUlm" server on port 8289 (thus sending the ULM header):
-	
+
 	exten => 190,1,Softmodem(localhost, 8289, v(V23)ld(8)s(1)un)
-	
+
+	To accept calls fom UK Prestel terminals, using V.23, 7 data bits, Even parity, 1 stop bit -
+
+	exten => 618,n,Softmodem(localhost, 6502, v(V23),ld(7)es(1)t(-8))
+
+
+
 	The modem seems to work fine with VOIP as long as you use a codec like G.711
 	(alaw/ulaw). Please deactivate any echo cancellation you might use.
 
@@ -62,32 +69,32 @@
  Btx, the Ulm Relay Protocol, general description of operation
 -------------------------------------------------------------------------------
 
-	After the softmodem picks up the line a TCP connection to the specified host 
+	After the softmodem picks up the line a TCP connection to the specified host
 	and port is established, the call is dropped when this wasn't successfull.
-	
+
 	When the "n" option is specified a NULL byte is send to the caller upon the detection of a carrier signal from the caller. The Btx system in Germany did this to request the caller's identification.
-	
+
 	With the "u" option specified a header is send to the TCP server at this
 	point. The header consists of some "name: value" pairs, separated by a CR+LF newline, terminated	by a double newline.
-	
+
 	At the moment this header looks like (for V.23):
 		Version: 1
 		TXspeed: 120
 		RXspeed: 7.5
 	Speeds are in bytes-per-second and may be used by the server to estimate
 	the length of the transmission.
-	
+
 	After the header all data received from the terminal is put onto the socket
 	and all data received from the socket is put on the line.
-	
+
 	The line is hung up when the server drops the connection, just as the
 	connection to the server is dropped when the line is hung up.
-	
+
 	You find my "Ulm Relay Protocol" server here:
 	http://github.com/proquar/twistedUlm
 	It sends CEPT T/CD 6-1 encoded data, which it retrieves from a webserver,
 	to the terminal and provides the characteristic BTX look-and-feel.
-	
+
 	You may also be interested in:
 		http://runningserver.com/?page=runningserver.content.thelab.bildschirmtrix
 	And you find a description of BTX MarkupLanguage here:
@@ -98,7 +105,7 @@
 -------------------------------------------------------------------------------
 
 	Christian Groeger <code@proquari.at>
-	
+
 	Based on code by:
 	Dmitry Andrianov <asterisk@dima.spb.ru>
 	Steve Underwood <steveu@coppice.org>
